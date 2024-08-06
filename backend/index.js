@@ -36,13 +36,104 @@ App.post("/signup", async (req, res) => { //allergens: allergies, diet, weight, 
             "INSERT INTO user_info (allergens, diet, daily_calorie_intake) VALUES ($1, $2, $3)",
             [allergens, diet, dailyCalorieIntake]
         );
-        console.log(result);
         res.status(201).send({ message: 'User created successfully' });
     } catch (error) {
-        console.log(error);
+        console.log(error, 'error in /signup');
         res.status(500).send({ message: "Error occurred when adding user to DB" });
     }
 });
+App.post("/add/recipe", async (req, res) => {
+    const { allergens, diet, ingredients, procedure, img, user_id, title, calories } = req.body; // Later retrieve user id from header
+
+    try {
+        const result = await db.query(
+            "INSERT INTO recipes (allergens, diet, ingredients, procedure, img, user_id, title, calories) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            [allergens, diet, ingredients, procedure, img, user_id, title, calories]
+        );
+        console.log(result);
+        res.status(201).send({ message: 'Recipe added successfully' });
+    } catch (error) {
+        console.log(error);
+        res.status(500).send({ message: 'Error occurred while adding recipe' });
+    }
+});
+App.post("/nutrition", async (req, res)=>{
+    const {id}= req.body;
+    const userInfo = await getUserInfo(id);
+    const nutrition = await createNutrition(userInfo.daily_calorie_intake, userInfo.allergens, userInfo.diet)
+    console.log(nutrition);
+    res.send(nutrition);
+    
+});
+
+async function getUserInfo(id) {
+    try {
+        const result = await db.query("SELECT * FROM user_info WHERE id = $1", [id]);
+        if (result.rowCount > 0) {
+            return result.rows[0];
+        } else {
+            return null;
+        }
+    } catch (error) {
+        console.log(error);
+        throw error; // Optionally rethrow the error to handle it outside
+    }
+}
+
+
+async function createNutrition(daily_calorie_intake, allergensArray, dietArray) {
+    const calories = [Math.floor((daily_calorie_intake / 100) * 25), Math.floor((daily_calorie_intake / 100) * 40), Math.floor((daily_calorie_intake / 100) * 35)];
+
+    // Create the dollar array for parameterized queries
+    let dollarArray = allergensArray.map((_, index) => `$${index + 1}`);
+    let dietDollarArray = dietArray.map((_, index) => `$${allergensArray.length + index + 1}`);
+    
+    let dailyRecipes = [];
+    try {
+        while (dailyRecipes.length !== 3) {
+            const currentCalories = calories[dailyRecipes.length];
+            const lowerCalorieBound = currentCalories - 150;
+            const upperCalorieBound = currentCalories + 150;
+            
+            // Adjust the query to use parameterized input
+            const dbProps = [
+                ...allergensArray,
+                ...dietArray
+            ];
+            
+            const dbQuery = `
+                SELECT * 
+                FROM recipes 
+                WHERE 
+                    NOT (allergens && ARRAY[${dollarArray.join(', ')}]::text[]) 
+                    AND diet @> ARRAY[${dietDollarArray.join(', ')}]::text[]
+                    AND calories BETWEEN $${dbProps.length + 1} AND $${dbProps.length + 2}
+                LIMIT 1
+            `
+            dbProps.push(lowerCalorieBound, upperCalorieBound);
+
+            const result = await db.query(dbQuery, dbProps);
+            console.log(result.rows);
+            console.log(dbQuery, dbProps);
+            
+            
+
+            if (result.rows.length > 0) {
+                dailyRecipes.push(result.rows[0]);
+            } else {
+                console.log('No more recipes found that match the criteria.');
+                break;
+            }
+        }
+    } catch (error) {
+        console.log(error);
+    }
+
+    console.log(dailyRecipes);
+    return dailyRecipes;
+}
+
+
 
 function calcDailyCalorieIntake(height, weight, goal, gender, age, activity) {
     let BMR;
