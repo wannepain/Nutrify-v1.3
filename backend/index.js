@@ -57,16 +57,37 @@ App.post("/add/recipe", async (req, res) => {
         res.status(500).send({ message: 'Error occurred while adding recipe' });
     }
 });
-App.post("/nutrition", async (req, res)=>{
-    const {id}= req.body;
-    const userInfo = await getUserInfo(id);
-    const nutrition = await createNutrition(userInfo.daily_calorie_intake, userInfo.allergens, userInfo.diet)
-    console.log(nutrition);
-    res.send(nutrition);
+App.post("/nutrition", async (req, res) => {
+    const { id } = req.body;
+    const dayOfWeek = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
     
+    try {
+        const userInfo = await getUserInfo(id); 
+
+        if (!userInfo) {
+            return res.status(404).send({ message: 'User not found' });
+        }
+
+        for (let i = 0; i < dayOfWeek.length; i++) {
+            const timeStamp = Date.now();
+            const nutrition = await createNutrition(userInfo.daily_calorie_intake, userInfo.allergens, userInfo.diet);
+            
+            if (nutrition.length === 3) {
+                await storeNutritionInDatabase(nutrition, dayOfWeek[i], id, timeStamp);
+            } else {
+                console.log(`Not enough nutrition data for ${dayOfWeek[i]}`);
+            }
+        }
+
+        res.status(201).send({ message: 'Nutrition data created successfully' });
+    } catch (error) {
+        console.log(error);
+        res.status(500).send({ message: 'An error occurred while creating nutrition data' });
+    }
 });
 
-async function getUserInfo(id) {
+
+async function getUserInfo(id) { //return user information
     try {
         const result = await db.query("SELECT * FROM user_info WHERE id = $1", [id]);
         if (result.rowCount > 0) {
@@ -80,43 +101,47 @@ async function getUserInfo(id) {
     }
 }
 
-
-async function createNutrition(daily_calorie_intake, allergensArray, dietArray) {
+async function createNutrition(daily_calorie_intake, allergensArray, dietArray) { // return array of 3 objects with recipe id 
     const calories = [Math.floor((daily_calorie_intake / 100) * 25), Math.floor((daily_calorie_intake / 100) * 40), Math.floor((daily_calorie_intake / 100) * 35)];
+    let dailyRecipes = [];
 
     // Create the dollar array for parameterized queries
     let dollarArray = allergensArray.map((_, index) => `$${index + 1}`);
     let dietDollarArray = dietArray.map((_, index) => `$${allergensArray.length + index + 1}`);
-    
-    let dailyRecipes = [];
+
     try {
         while (dailyRecipes.length !== 3) {
             const currentCalories = calories[dailyRecipes.length];
             const lowerCalorieBound = currentCalories - 150;
             const upperCalorieBound = currentCalories + 150;
-            
+
             // Adjust the query to use parameterized input
             const dbProps = [
                 ...allergensArray,
                 ...dietArray
             ];
-            
+
+            // Include the recipe ids to exclude
+            const excludeRecipeIds = dailyRecipes.map(recipe => recipe.id);
+            let excludeRecipePlaceholders = "";
+            if (excludeRecipeIds.length > 0) {
+                excludeRecipePlaceholders = "AND id != ALL($" + (dbProps.length + 1) + "::int[])";
+                dbProps.push(excludeRecipeIds);
+            }
+
             const dbQuery = `
-                SELECT * 
+                SELECT id 
                 FROM recipes 
                 WHERE 
                     NOT (allergens && ARRAY[${dollarArray.join(', ')}]::text[]) 
                     AND diet @> ARRAY[${dietDollarArray.join(', ')}]::text[]
+                    ${excludeRecipePlaceholders}
                     AND calories BETWEEN $${dbProps.length + 1} AND $${dbProps.length + 2}
-                LIMIT 1
-            `
+                LIMIT 1;
+            `;
             dbProps.push(lowerCalorieBound, upperCalorieBound);
 
             const result = await db.query(dbQuery, dbProps);
-            console.log(result.rows);
-            console.log(dbQuery, dbProps);
-            
-            
 
             if (result.rows.length > 0) {
                 dailyRecipes.push(result.rows[0]);
@@ -129,9 +154,25 @@ async function createNutrition(daily_calorie_intake, allergensArray, dietArray) 
         console.log(error);
     }
 
-    console.log(dailyRecipes);
     return dailyRecipes;
 }
+
+async function storeNutritionInDatabase(nutritionArray, dayOfWeek, userId, timeStamp) {
+    const recipeIdArray = nutritionArray.map(recipe => recipe.id);
+
+    try {
+        const result = await db.query(
+            "INSERT INTO daily_meals (user_id, day_of_week, breakfast, lunch, dinner, time_stamp) VALUES ($1, $2, $3, $4, $5, $6)", 
+            [userId, dayOfWeek, recipeIdArray[0], recipeIdArray[1], recipeIdArray[2], timeStamp]
+        );
+        console.log(result);
+        return { success: true, result: result };
+    } catch (error) {
+        console.log(error);
+        return { success: false, error: error };
+    }
+}
+
 
 
 
