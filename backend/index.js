@@ -2,6 +2,7 @@ import bodyParser from 'body-parser';
 import Express from 'express';
 import cors from "cors";
 import pg from "pg";
+import { log } from 'console';
 
 const App = Express();
 const Port = 3000;
@@ -13,9 +14,7 @@ const db = new pg.Client({
     port: 5432
 });
 
-db.connect()
-
-
+db.connect();
 
 App.use(bodyParser.json());
 App.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
@@ -58,7 +57,7 @@ App.post("/add/recipe", async (req, res) => {
     }
 });
 App.post("/nutrition", async (req, res) => {
-    const { id } = req.body;
+    const { id, time_in_millis } = req.body;
     const dayOfWeek = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
     
     try {
@@ -69,11 +68,10 @@ App.post("/nutrition", async (req, res) => {
         }
 
         for (let i = 0; i < dayOfWeek.length; i++) {
-            const timeStamp = Date.now();
             const nutrition = await createNutrition(userInfo.daily_calorie_intake, userInfo.allergens, userInfo.diet);
             
             if (nutrition.length === 3) {
-                await storeNutritionInDatabase(nutrition, dayOfWeek[i], id, timeStamp);
+                await storeNutritionInDatabase(nutrition, dayOfWeek[i], id, time_in_millis);
             } else {
                 console.log(`Not enough nutrition data for ${dayOfWeek[i]}`);
             }
@@ -85,7 +83,73 @@ App.post("/nutrition", async (req, res) => {
         res.status(500).send({ message: 'An error occurred while creating nutrition data' });
     }
 });
+App.post('/update_nutrition', async (req, res) => {
+    const { userId, time_in_millis } = req.body;
+    
+    try {
+        const nutritionDataArray = await getUserNutrition(userId);
+        
+        if (nutritionDataArray.length === 0) {
+            return res.status(404).json({ message: 'No nutrition data found for user' });
+        }
+        
+        // Assuming the last entry in the nutrition data array has the latest timestamp
+        const latestTimestamp = nutritionDataArray[nutritionDataArray.length - 1].time_stamp;
+        const storedDate = new Date(latestTimestamp);
+        const currentDate = new Date(time_in_millis);
+        
+        // Initialize currentDay to the day after the storedDate
+        let currentDay = new Date(storedDate);
+        currentDay.setDate(currentDay.getDate() + 1);
+        currentDay.setHours(0, 0, 0, 0); // Set to the start of the next day after storedDate
+        
+        while (currentDay <= currentDate) {
+            // Get the day of the week before midnight
+            const dayBeforeMidnight = currentDay.toLocaleString('en-US', { weekday: 'short' }).toLocaleLowerCase();
+            
+            console.log(`Updating nutrition for ${dayBeforeMidnight}`);
 
+            // Proceed with the update
+            await updateNutrition(userId, dayBeforeMidnight, time_in_millis);
+            
+            // Move to the next day
+            currentDay.setDate(currentDay.getDate() + 1);
+        }
+
+        res.status(200).json({ message: 'Nutrition updated successfully' });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ message: 'Internal server error' });
+    }
+});
+
+async function getUserNutrition(id) {  //return object : {id: int, allergens: [], daily_calorie_intake: int, diet:[]}
+    try {
+        const result = await db.query("SELECT * FROM daily_meals WHERE user_id = $1 ORDER BY time_stamp ASC", [id]);
+        if (result.rowCount > 0) {
+            return result.rows;
+        } else {
+            return [];
+        }
+    } catch (error) {
+        console.log(error);
+    }
+}
+
+async function updateNutrition(user_id, prevDay, time_in_millis) { //updates nutrition in database
+    try {
+        const userInfo = await getUserInfo(user_id);
+        const newNutrition = await createNutrition(userInfo.daily_calorie_intake, userInfo.allergens, userInfo.diet);
+
+        const result = await db.query(
+            "UPDATE daily_meals SET breakfast = $1, lunch = $2, dinner = $3, time_stamp = $4 WHERE user_id = $5 AND day_of_week = $6", 
+            [newNutrition[0].id, newNutrition[1].id, newNutrition[2].id, time_in_millis, parseInt(user_id), prevDay]
+        );
+        console.log(`Updated nutrition for user ${user_id} on ${prevDay}`);
+    } catch (error) {
+        console.error(`Failed to update nutrition for user ${user_id} on ${prevDay}:`, error);
+    }
+}
 
 async function getUserInfo(id) { //return user information
     try {
@@ -157,7 +221,7 @@ async function createNutrition(daily_calorie_intake, allergensArray, dietArray) 
     return dailyRecipes;
 }
 
-async function storeNutritionInDatabase(nutritionArray, dayOfWeek, userId, timeStamp) {
+async function storeNutritionInDatabase(nutritionArray, dayOfWeek, userId, timeStamp) { // stores nutrition into the database
     const recipeIdArray = nutritionArray.map(recipe => recipe.id);
 
     try {
@@ -173,10 +237,7 @@ async function storeNutritionInDatabase(nutritionArray, dayOfWeek, userId, timeS
     }
 }
 
-
-
-
-function calcDailyCalorieIntake(height, weight, goal, gender, age, activity) {
+function calcDailyCalorieIntake(height, weight, goal, gender, age, activity) {// return daily calorie intake
     let BMR;
         let cals;
         let maxCals;
